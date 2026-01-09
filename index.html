@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Street View</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #streetview {
+            width: 100%;
+            height: 100%;
+        }
+        #close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: white;
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #close-btn:hover {
+            background: #f0f0f0;
+        }
+        #error {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.2);
+            text-align: center;
+            max-width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <button id="close-btn" onclick="closeStreetView()">×</button>
+    <div id="streetview"></div>
+    <div id="error">
+        <h3>Street View Not Available</h3>
+        <p>No street view imagery found for this location.</p>
+    </div>
+
+    <script>
+        // Get coordinates from URL parameters
+        function getUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                lat: parseFloat(params.get('lat')) || 34.0522,
+                lng: parseFloat(params.get('lng')) || -118.2437,
+                heading: parseFloat(params.get('heading')) || 0,
+                pitch: parseFloat(params.get('pitch')) || 0,
+                zoom: parseFloat(params.get('zoom')) || 1
+            };
+        }
+
+        const params = getUrlParams();
+
+        function initStreetView() {
+            const streetViewService = new google.maps.StreetViewService();
+            const panorama = new google.maps.StreetViewPanorama(
+                document.getElementById('streetview')
+            );
+
+            // Check if Street View is available at this location
+            streetViewService.getPanorama({
+                location: { lat: params.lat, lng: params.lng },
+                radius: 50 // Search within 50 meters
+            }, function(data, status) {
+                if (status === 'OK') {
+                    panorama.setPano(data.location.pano);
+                    panorama.setPov({
+                        heading: params.heading,
+                        pitch: params.pitch
+                    });
+                    panorama.setZoom(params.zoom);
+                    panorama.setVisible(true);
+                } else {
+                    document.getElementById('error').style.display = 'block';
+                }
+            });
+        }
+
+        function closeStreetView() {
+            // Send message to React Native WebView
+            if (window.ReactNativeWebView) {
+                window.ReactNativeWebView.postMessage('close');
+            }
+            // Fallback for testing in browser
+            window.history.back();
+        }
+    </script>
+    
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&callback=initStreetView">
+    </script>
+</body>
+</html>
