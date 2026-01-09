@@ -1,108 +1,541 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Street View</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body, html {
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-        #streetview {
-            width: 100%;
-            height: 100%;
-        }
-        #status {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-            z-index: 1000;
-            max-width: 300px;
-        }
-        .error {
-            color: #d32f2f;
-        }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Arch Guide – Buildings Map</title>
+
+  <script src="https://cdn.apple-mapkit.com/mk/5.x.x/mapkit.js" crossorigin></script>
+
+  <style>
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+    #map { width:100%; height:100%; }
+  </style>
 </head>
 <body>
-    <div id="status">Loading Street View...</div>
-    <div id="streetview"></div>
+  <div id="map"></div>
 
-    <script>
-        window.gm_authFailure = function() {
-            document.getElementById('status').innerHTML = 
-                '<span class="error">❌ API Key Error</span>';
+  <script>
+    // --- CONFIG ---
+    const SUPABASE_URL = 'https://msuzmrfzzkqffhpilirb.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1zdXptcmZ6emtxZmZocGlsaXJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3NjY5NDAsImV4cCI6MjA4MjM0Mjk0MH0.kGHLaDT2FR9AAnZjP96FgAcSPjCQm6w9ifAqd6cEOoQ';
+    
+    const MAPKIT_TOKEN = 'eyJraWQiOiJSN05HVzZZNko3IiwidHlwIjoiSldUIiwiYWxnIjoiRVMyNTYifQ.eyJpc3MiOiI4N05MV1VQUVFBIiwiaWF0IjoxNzY3NjcxMDk2LCJvcmlnaW4iOiJhcmNoZ3VpZGUuZ2l0aHViLmlvIn0.aGopUszusE4HfaiqItorz1NoVxzy5z46YItwrq43WVgyERsMm8kkmLZMJNUHd83c-icIhRra2mBFwgpdvYk-SA';
+
+    const NEIGHBORHOOD_COLORS = {
+      'DTL': '#1150AB',
+      'SLV': '#2E7D6F',
+      'PAS': '#C56B3C',
+      'LFZ': '#E85D75',
+      'WHO': '#F4A261'
+    };
+
+    const DEFAULT_PROXIMITY_RADIUS = 2; // miles
+
+    // --- Get parameters from URL ---
+    const params = new URLSearchParams(window.location.search);
+    const USER_ID = params.get('user_id');
+    const TOUR_ID = params.get('tour_id');
+    const USER_LAT = params.get('user_lat');
+    const USER_LNG = params.get('user_lng');
+    
+    if (!USER_ID) {
+      document.body.innerHTML = '<div style="padding:20px;color:red;">Error: user_id required</div>';
+      throw new Error('USER_ID missing from URL');
+    }
+
+    // --- MapKit Init ---
+    mapkit.init({
+      authorizationCallback: function(done) {
+        done(MAPKIT_TOKEN);
+      }
+    });
+
+    const map = new mapkit.Map("map", {
+      center: new mapkit.Coordinate(34.0522, -118.2437),
+      region: new mapkit.CoordinateRegion(
+        new mapkit.Coordinate(34.0522, -118.2437),
+        new mapkit.CoordinateSpan(0.4, 0.5)
+      ),
+      showsCompass: mapkit.FeatureVisibility.Hidden,
+      showsScale: false,
+      showsMapTypeControl: false,
+      isZoomEnabled: true,
+      isScrollEnabled: true,
+      showsUserLocation: params.get('track_location') === 'true',
+      showsUserLocationControl: false
+    });
+
+    // --- State ---
+    let allBuildings = [];
+    let unlockedSet = new Set();
+    let favoritesSet = new Set();
+    let savedRouteSet = new Set();
+    let tourStops = [];
+    let tourRoute = [];
+    let buildingAnnotations = [];
+    let routePolylines = [];
+    let userLocation = null;
+
+    // --- Helper: Supabase fetch ---
+    async function supaJson(path) {
+      const res = await fetch(`${SUPABASE_URL}${path}`, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Accept': 'application/json'
+        }
+      });
+      if (!res.ok) {
+        const error = await res.text();
+        console.error('Supabase error:', error);
+        throw new Error(`Supabase: ${res.status} ${error}`);
+      }
+      return res.json();
+    }
+
+    // --- Helper: Save map position to Supabase ---
+    async function saveMapPosition(latitude, longitude, zoomLevel) {
+      try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/user_map_state`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify({
+            user_id: USER_ID,
+            center_latitude: latitude,
+            center_longitude: longitude,
+            zoom_level: zoomLevel,
+            updated_at: new Date().toISOString()
+          })
+        });
+        
+        if (res.ok) {
+          console.log('Map position saved');
+        }
+      } catch (err) {
+        console.error('Failed to save map position:', err);
+      }
+    }
+
+    // --- Helper: Load saved map position from Supabase ---
+    async function loadMapPosition() {
+      try {
+        const rows = await supaJson(
+          `/rest/v1/user_map_state?user_id=eq.${encodeURIComponent(USER_ID)}&select=center_latitude,center_longitude,zoom_level&limit=1`
+        );
+        
+        if (rows && rows.length > 0) {
+          const saved = rows[0];
+          console.log('Loaded saved map position:', saved);
+          return saved;
+        }
+      } catch (err) {
+        console.log('No saved map position');
+      }
+      return null;
+    }
+
+    // --- Helper: Save selected building to Supabase ---
+    async function saveSelectedBuilding(buildingId, buildingTitle) {
+      try {
+        // Save to a user_selections table or update user profile
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/user_selections`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify({
+            user_id: USER_ID,
+            selected_building_id: buildingId,
+            selected_building_title: buildingTitle,
+            selected_at: new Date().toISOString()
+          })
+        });
+        
+        if (res.ok) {
+          console.log('Selected building saved to Supabase');
+        }
+      } catch (err) {
+        console.error('Failed to save selection:', err);
+      }
+    }
+
+    // --- Helper: Calculate distance in miles ---
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+      const R = 3959; // Earth's radius in miles
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+
+    // --- Load data functions ---
+    async function loadBuildingsOnce() {
+      try {
+        allBuildings = await supaJson(
+          `/rest/v1/buildings?select=id,title,latitude,longitude,image,neighborhood_id,is_free`
+        );
+        console.log(`Loaded ${allBuildings.length} buildings`);
+      } catch (err) {
+        console.error('Failed to load buildings:', err);
+        allBuildings = [];
+      }
+    }
+
+    async function loadUnlockedOnce() {
+      try {
+        const rows = await supaJson(
+          `/rest/v1/user_building_unlocks?user_id=eq.${encodeURIComponent(USER_ID)}&select=building_id`
+        );
+        unlockedSet = new Set(rows.map(r => r.building_id));
+        console.log(`User has ${unlockedSet.size} unlocked buildings`);
+      } catch (err) {
+        console.log('No unlocked buildings data');
+        unlockedSet = new Set();
+      }
+    }
+
+    async function loadFavoritesOnce() {
+      try {
+        const rows = await supaJson(
+          `/rest/v1/user_favorites?user_id=eq.${encodeURIComponent(USER_ID)}&select=building_id`
+        );
+        favoritesSet = new Set(rows.map(r => r.building_id));
+        console.log(`User has ${favoritesSet.size} favorites`);
+      } catch (err) {
+        console.log('No favorites data');
+        favoritesSet = new Set();
+      }
+    }
+
+    async function loadSavedRouteOnce() {
+      try {
+        const rows = await supaJson(
+          `/rest/v1/user_routes?user_id=eq.${encodeURIComponent(USER_ID)}&select=building_id`
+        );
+        savedRouteSet = new Set(rows.map(r => r.building_id));
+        console.log(`User has ${savedRouteSet.size} buildings in saved route`);
+      } catch (err) {
+        console.log('No saved route data');
+        savedRouteSet = new Set();
+      }
+    }
+
+    async function loadTourData(tourId) {
+      if (!tourId) return;
+      
+      try {
+        const stops = await supaJson(
+          `/rest/v1/tour_stops?tour_id=eq.${encodeURIComponent(tourId)}&select=building_id,stop_order&order=stop_order`
+        );
+        tourStops = stops;
+        console.log(`Tour has ${tourStops.length} stops`);
+
+        try {
+          const route = await supaJson(
+            `/rest/v1/tour_routes?tour_id=eq.${encodeURIComponent(tourId)}&select=route_points,route_order&order=route_order`
+          );
+          tourRoute = route;
+          console.log(`Tour has ${tourRoute.length} route segments`);
+        } catch (err) {
+          console.log('No tour route data');
+          tourRoute = [];
+        }
+      } catch (err) {
+        console.error('Failed to load tour data:', err);
+        tourStops = [];
+        tourRoute = [];
+      }
+    }
+
+    // --- Get user location ---
+    async function getUserLocation() {
+      return new Promise((resolve) => {
+        if (!navigator.geolocation) {
+          console.log('Geolocation not supported');
+          resolve(null);
+          return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const location = {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude
+            };
+            console.log('User location:', location);
+            resolve(location);
+          },
+          (error) => {
+            console.log('Location error:', error.message);
+            resolve(null);
+          },
+          { timeout: 5000, enableHighAccuracy: true }
+        );
+      });
+    }
+
+    // --- Pin management ---
+    function clearPins() {
+      buildingAnnotations.forEach(a => map.removeAnnotation(a));
+      buildingAnnotations = [];
+    }
+
+    function clearRoutes() {
+      routePolylines.forEach(p => map.removeOverlay(p));
+      routePolylines = [];
+    }
+
+    function addPins(buildings) {
+      clearPins();
+      
+      buildings.forEach(b => {
+        if (!b.latitude || !b.longitude) return;
+
+        const ann = new mapkit.MarkerAnnotation(
+          new mapkit.Coordinate(Number(b.latitude), Number(b.longitude)),
+          {
+            color: NEIGHBORHOOD_COLORS[b.neighborhood_id] || '#666666',
+            glyphText: '',
+            title: b.title,
+            data: b
+          }
+        );
+
+        ann.callout = {
+          calloutElementForAnnotation: function(annotation) {
+            const building = annotation.data;
+            const callout = document.createElement('div');
+            callout.style.cssText = `
+              width:155px;height:155px;border-radius:12px;overflow:hidden;
+              box-shadow:0 8px 24px rgba(0,0,0,0.25);cursor:pointer;background:white;
+            `;
+            callout.innerHTML = building.image
+              ? `<img src="${building.image}" alt="${building.title}" style="width:100%;height:100%;object-fit:cover;display:block;" />`
+              : `<div style="width:100%;height:100%;background:#ddd;display:flex;align-items:center;justify-content:center;font-size:14px;color:#666;">No Image</div>`;
+
+            callout.addEventListener('click', () => {
+              // Save selected building to Supabase
+              saveSelectedBuilding(building.id, building.title);
+              
+              console.log('Building selected:', building.id, building.title);
+            });
+
+            return callout;
+          }
         };
 
-        function getUrlParams() {
-            const params = new URLSearchParams(window.location.search);
-            return {
-                lat: parseFloat(params.get('lat')) || 34.0507,
-                lng: parseFloat(params.get('lng')) || -118.2478,
-                heading: parseFloat(params.get('heading')) || 0,
-                pitch: parseFloat(params.get('pitch')) || 0,
-                zoom: parseFloat(params.get('zoom')) || 1
+        map.addAnnotation(ann);
+        buildingAnnotations.push(ann);
+      });
+
+      // Always zoom to show all pins
+      if (buildingAnnotations.length) {
+        map.showItems(buildingAnnotations);
+      }
+      console.log(`Showing ${buildingAnnotations.length} pins`);
+    }
+
+    function addRoutePolylines() {
+      clearRoutes();
+      
+      if (!tourRoute || tourRoute.length === 0) return;
+
+      tourRoute.forEach(segment => {
+        if (!segment.route_points) return;
+
+        try {
+          const points = JSON.parse(segment.route_points);
+          const coordinates = points.map(p => new mapkit.Coordinate(p.lat, p.lng));
+          
+          if (coordinates.length < 2) return;
+
+          const polyline = new mapkit.PolylineOverlay(coordinates, {
+            style: new mapkit.Style({
+              strokeColor: '#1150AB',
+              strokeWidth: 4,
+              strokeOpacity: 0.8
+            })
+          });
+
+          map.addOverlay(polyline);
+          routePolylines.push(polyline);
+        } catch (err) {
+          console.error('Failed to parse route points:', err);
+        }
+      });
+
+      console.log(`Added ${routePolylines.length} route segments`);
+    }
+
+    // --- Filter logic ---
+    function applyFilters() {
+      // Read filter parameters - default to true if not specified  
+      const showAvailable = params.get('show_available') !== 'false';
+      const showLocked = params.get('show_locked') !== 'false';
+      const showFavorites = params.get('show_favorites') === 'true';
+      const showSavedRoute = params.get('show_saved_route') === 'true';
+      const showNearby = params.get('show_nearby') === 'true';
+      const neighborhoodsParam = params.get('neighborhoods');
+      const proximityRadius = parseFloat(params.get('proximity_radius')) || DEFAULT_PROXIMITY_RADIUS;
+
+      let filteredBuildings = [];
+
+      if (TOUR_ID) {
+        // Tour mode: show only tour stops regardless of filters
+        const tourStopIds = new Set(tourStops.map(s => s.building_id));
+        filteredBuildings = allBuildings.filter(b => tourStopIds.has(b.id));
+        
+        addRoutePolylines();
+        
+        if (filteredBuildings.length > 0) {
+          const coords = filteredBuildings.map(b => new mapkit.Coordinate(Number(b.latitude), Number(b.longitude)));
+          const region = mapkit.CoordinateRegion.regionFittingCoordinates(coords);
+          map.setRegion(region, true);
+        }
+      } else {
+        // Filter mode with AND logic
+        filteredBuildings = allBuildings.filter(b => {
+          // 1. Available/Locked filter
+          const isFree = b.is_free === true;
+          const isUnlocked = unlockedSet.has(b.id);
+          const isAvailable = isFree || isUnlocked;
+          const isLocked = !isAvailable;
+
+          let passesAvailableFilter = true;
+          if (isAvailable && !showAvailable) passesAvailableFilter = false;
+          if (isLocked && !showLocked) passesAvailableFilter = false;
+
+          // 2. Favorites filter
+          let passesFavoritesFilter = true;
+          if (showFavorites) {
+            passesFavoritesFilter = favoritesSet.has(b.id);
+          }
+
+          // 3. Saved Route filter
+          let passesSavedRouteFilter = true;
+          if (showSavedRoute) {
+            passesSavedRouteFilter = savedRouteSet.has(b.id);
+          }
+
+          // 4. Neighborhood filter
+          let passesNeighborhoodFilter = true;
+          if (neighborhoodsParam) {
+            const allowedNeighborhoods = neighborhoodsParam.split(',').map(n => n.trim());
+            passesNeighborhoodFilter = allowedNeighborhoods.includes(b.neighborhood_id);
+          }
+
+          // 5. Proximity filter
+          let passesProximityFilter = true;
+          if (showNearby && userLocation) {
+            const distance = calculateDistance(
+              userLocation.latitude,
+              userLocation.longitude,
+              Number(b.latitude),
+              Number(b.longitude)
+            );
+            passesProximityFilter = distance <= proximityRadius;
+          }
+
+          // AND logic: must pass all active filters
+          return passesAvailableFilter && 
+                 passesFavoritesFilter && 
+                 passesSavedRouteFilter && 
+                 passesNeighborhoodFilter && 
+                 passesProximityFilter;
+        });
+      }
+
+      addPins(filteredBuildings);
+    }
+
+    // --- Initialize ---
+    (async function init() {
+      try {
+        await loadBuildingsOnce();
+        await loadUnlockedOnce();
+        await loadFavoritesOnce();
+        await loadSavedRouteOnce();
+        
+        if (TOUR_ID) {
+          await loadTourData(TOUR_ID);
+        }
+
+        // Get user location if tracking enabled or proximity filter active
+        const trackLocation = params.get('track_location') === 'true';
+        const showNearby = params.get('show_nearby') === 'true';
+        const restorePosition = params.get('restore_position') !== 'false'; // Default true
+        
+        if (trackLocation || showNearby) {
+          // First try URL parameters (passed from Draftbit)
+          if (USER_LAT && USER_LNG) {
+            userLocation = {
+              latitude: parseFloat(USER_LAT),
+              longitude: parseFloat(USER_LNG)
             };
+            console.log('User location from URL params:', userLocation);
+          } else {
+            // Fallback to browser geolocation
+            userLocation = await getUserLocation();
+          }
+          
+          // Center on user location on initial load if tracking enabled
+          if (trackLocation && userLocation) {
+            map.setCenterAnimated(
+              new mapkit.Coordinate(userLocation.latitude, userLocation.longitude),
+              false
+            );
+          }
         }
 
-        const params = getUrlParams();
+        applyFilters();
 
-        function initStreetView() {
-            const streetViewService = new google.maps.StreetViewService();
-            const panorama = new google.maps.StreetViewPanorama(
-                document.getElementById('streetview'),
-                {
-                    addressControl: false,
-                    linksControl: true,
-                    panControl: true,
-                    zoomControl: true,
-                    fullscreenControl: true,
-                    clickToGo: true,
-                    scrollwheel: true
-                }
+        // After filters applied, try to restore saved map position
+        if (restorePosition && !TOUR_ID) {
+          const savedPosition = await loadMapPosition();
+          if (savedPosition) {
+            // Calculate appropriate span based on zoom level
+            const span = savedPosition.zoom_level || 0.4;
+            map.setRegionAnimated(
+              new mapkit.CoordinateRegion(
+                new mapkit.Coordinate(savedPosition.center_latitude, savedPosition.center_longitude),
+                new mapkit.CoordinateSpan(span, span)
+              ),
+              false
             );
-
-            streetViewService.getPanorama(
-                {
-                    location: { lat: params.lat, lng: params.lng },
-                    radius: 50,
-                    source: google.maps.StreetViewSource.OUTDOOR
-                },
-                function(data, status) {
-                    if (status === 'OK') {
-                        panorama.setPano(data.location.pano);
-                        panorama.setPov({
-                            heading: params.heading,
-                            pitch: params.pitch
-                        });
-                        panorama.setZoom(params.zoom);
-                        panorama.setVisible(true);
-                        
-                        setTimeout(() => {
-                            document.getElementById('status').style.display = 'none';
-                        }, 1000);
-                    } else {
-                        document.getElementById('status').innerHTML = 
-                            '<span class="error">❌ No Street View available</span>';
-                    }
-                }
-            );
+          }
         }
-    </script>
-    
-    <script async defer
-        src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDDdD8BAz34j_0zv-G3qJKTP5sKQn7PQ1w&callback=initStreetView">
-    </script>
+
+        // Listen for map region changes and save position
+        // Debounce to avoid too many saves
+        let saveTimeout;
+        map.addEventListener('region-change-end', () => {
+          clearTimeout(saveTimeout);
+          saveTimeout = setTimeout(() => {
+            const center = map.center;
+            const region = map.region;
+            const span = region.span.latitudeDelta;
+            saveMapPosition(center.latitude, center.longitude, span);
+          }, 500);
+        });
+
+      } catch (err) {
+        console.error('Initialization error:', err);
+        document.body.innerHTML = `<div style="padding:20px;color:red;">Error: ${err.message}</div>`;
+      }
+    })();
+  </script>
 </body>
 </html>
