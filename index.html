@@ -51,6 +51,7 @@
             box-shadow: 0 2px 16px rgba(0,0,0,0.2);
             text-align: center;
             max-width: 300px;
+            z-index: 1001;
         }
     </style>
 </head>
@@ -60,15 +61,18 @@
     <div id="error">
         <h3>Street View Not Available</h3>
         <p>No street view imagery found for this location.</p>
+        <button onclick="document.getElementById('error').style.display='none'" 
+                style="margin-top: 10px; padding: 8px 16px; background: #007AFF; color: white; border: none; border-radius: 6px;">
+            Close
+        </button>
     </div>
 
     <script>
-        // Get coordinates from URL parameters
         function getUrlParams() {
             const params = new URLSearchParams(window.location.search);
             return {
-                lat: parseFloat(params.get('lat')) || 34.0522,
-                lng: parseFloat(params.get('lng')) || -118.2437,
+                lat: parseFloat(params.get('lat')) || 34.0507,
+                lng: parseFloat(params.get('lng')) || -118.2478,
                 heading: parseFloat(params.get('heading')) || 0,
                 pitch: parseFloat(params.get('pitch')) || 0,
                 zoom: parseFloat(params.get('zoom')) || 1
@@ -79,41 +83,59 @@
 
         function initStreetView() {
             const streetViewService = new google.maps.StreetViewService();
+            
             const panorama = new google.maps.StreetViewPanorama(
-                document.getElementById('streetview')
-            );
-
-            // Check if Street View is available at this location
-            streetViewService.getPanorama({
-                location: { lat: params.lat, lng: params.lng },
-                radius: 50 // Search within 50 meters
-            }, function(data, status) {
-                if (status === 'OK') {
-                    panorama.setPano(data.location.pano);
-                    panorama.setPov({
+                document.getElementById('streetview'),
+                {
+                    // Enable all navigation controls
+                    addressControl: false,
+                    linksControl: true,  // Show navigation arrows
+                    panControl: true,    // Enable panning
+                    zoomControl: true,   // Enable zoom
+                    fullscreenControl: false,
+                    motionTracking: false,
+                    motionTrackingControl: false,
+                    // Set initial view
+                    pov: {
                         heading: params.heading,
                         pitch: params.pitch
-                    });
-                    panorama.setZoom(params.zoom);
-                    panorama.setVisible(true);
-                } else {
-                    document.getElementById('error').style.display = 'block';
+                    },
+                    zoom: params.zoom,
+                    // Make it clickable to move
+                    clickToGo: true,
+                    scrollwheel: true
                 }
-            });
+            );
+
+            // Find nearest Street View location
+            streetViewService.getPanorama(
+                {
+                    location: { lat: params.lat, lng: params.lng },
+                    radius: 50,
+                    source: google.maps.StreetViewSource.OUTDOOR
+                },
+                function(data, status) {
+                    if (status === 'OK') {
+                        panorama.setPano(data.location.pano);
+                        panorama.setVisible(true);
+                    } else {
+                        console.error('Street View not available:', status);
+                        document.getElementById('error').style.display = 'block';
+                    }
+                }
+            );
         }
 
         function closeStreetView() {
-            // Send message to React Native WebView
             if (window.ReactNativeWebView) {
                 window.ReactNativeWebView.postMessage('close');
             }
-            // Fallback for testing in browser
             window.history.back();
         }
     </script>
     
     <script async defer
-        src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDDdD8BAz34j_0zv-G3qJKTP5sKQn7PQ1w&callback=initMap&callback=initStreetView">
+        src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&callback=initStreetView">
     </script>
 </body>
 </html>
